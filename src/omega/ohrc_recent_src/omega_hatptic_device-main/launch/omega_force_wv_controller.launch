@@ -1,0 +1,13 @@
+<launch>
+<arg name="frequency" default="2000.0"/>
+<arg name="frame" default="omega_link"/>
+<arg name="realtime" default="true"/>
+
+<node pkg="tf2_ros" type="static_transform_publisher" name="omega_link_broadcaster" args="1.0 0 0 -1.570796 0 0 world omega_link" />
+<node pkg="omega_haptic_device" type="omega_force_wv_controller" name="omega_driver" output="screen">
+  <param name="frequency" value="$(arg frequency)"/>
+  <param name="frame" value="$(arg frame)"/>
+  <param name="realtime" value="$(arg realtime)"/>
+</node>
+
+</launch>

@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>omega_haptic_device</name>
+  <version>0.0.1</version>
+  <description>The omega_haptic_device package (ROS2 version)</description>
+
+  <maintainer email="itadera@todo.todo">itadera</maintainer>
+  <license>MIT</license>
+
+  <!-- ROS 2 build system -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Message generation for ROS2 -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <!-- Common dependencies -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>ohrc_msgs</depend>
+
+  <!-- Declare that this package provides interface files (.msg etc.) -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
