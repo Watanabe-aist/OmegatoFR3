@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-omega_to_fr3_q_goal_dual_integrated_factr_style.py
+omega_to_fr3_q_goal_dual_bilateral.py
 
 目的:
   既存の omega_to_fr3_q_goal_dual.py の q_goal 制御に，
   FR3外力 -> Omega力覚返しを同じROSノード内で統合する。
   FACTRを参考に，Omega速度に対するダンピングと任意の重力/バイアス補償を加える。
 
+通常モード:
+  右FR3のZ方向外力 -> 右OmegaのZ方向へ返す
+  左FR3のZ方向外力 -> 左OmegaのZ方向へ返す
+
+リフティングモード:
+  右FR3のZ方向外力と左FR3のZ方向外力の平均を右Omegaへ返す
+  左Omegaには0を返す
+
 使い方:
   1. このファイルを ~/franka_ros2_ws/test_scripts/ に置く
-  2. 既存の omega_to_fr3_q_goal_dual.py と
-     franka_wrench_to_omega_force_cmd.py は起動しない
-  3. 以下を実行:
-       python3 ~/franka_ros2_ws/test_scripts/omega_to_fr3_q_goal_dual_integrated_factr_style.py --name dual --force-mode wrench
+  2. 既存の omega_to_fr3_q_goal_dual.py は親クラスとして残す
+  3. franka_wrench_to_omega_force_cmd.py は起動しない
+  4. 以下を実行:
+       python3 ~/franka_ros2_ws/test_scripts/omega_to_fr3_q_goal_dual_bilateral.py --name dual --force-mode wrench --force-sign-z -1.0
 
 注意:
   - Omega driver right/left は今まで通り別ターミナルで起動する。
@@ -40,6 +48,23 @@ from omega_to_fr3_q_goal_dual import (  # noqa: E402
 # ==========================================================
 RIGHT_OMEGA_FORCE_CMD_TOPIC = "/right/force_cmd"
 LEFT_OMEGA_FORCE_CMD_TOPIC = "/left/force_cmd"
+
+
+# ==========================================================
+# Lifting mode中の力覚返し設定
+# ==========================================================
+# "separate":
+#   リフティング中も通常通り，
+#   右FR3 -> 右Omega
+#   左FR3 -> 左Omega
+#
+# "right_average":
+#   リフティング中だけ，
+#   右FR3と左FR3のZ方向力覚の平均を右Omegaへ返す。
+#   左Omegaにはゼロを返す。
+#
+# 今回はユーザー指定どおり average mode にする。
+LIFTING_FORCE_FEEDBACK_MODE = "right_average"
 
 
 class ForceBiasEstimator:
@@ -75,6 +100,7 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
       - そのため，q_goalとforce_cmdは同じPythonプロセス，同じROSノード，同じ制御周期側で動く。
       - もう franka_wrench_to_omega_force_cmd.py は起動しない。
       - FACTRの torque_feedback と同じ考えで，力覚に速度ダンピングを入れる。
+      - リフティング中だけ左右Z力覚の平均を右Omegaへ集約する。
     """
 
     def __init__(
@@ -171,7 +197,8 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
             f"publish_every_n_loops={self.publish_every_n_loops}, "
             f"damping_xy={self.force_damping_xy}, "
             f"damping_z={self.force_damping_z}, "
-            f"omega_gravity_comp={self.omega_gravity_comp.round(3).tolist()}"
+            f"omega_gravity_comp={self.omega_gravity_comp.round(3).tolist()}, "
+            f"lifting_force_feedback_mode={LIFTING_FORCE_FEEDBACK_MODE}"
         )
 
         if self.force_mode == "wrench" and bias_sample_count > 0:
@@ -231,7 +258,11 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
         except Exception:
             return np.zeros(3, dtype=float)
 
-    def apply_factr_style_damping_and_comp(self, side: str, force_cmd: np.ndarray) -> np.ndarray:
+    def apply_factr_style_damping_and_comp(
+        self,
+        side: str,
+        force_cmd: np.ndarray,
+    ) -> np.ndarray:
         """
         FACTRの torque_feedback では，外力フィードバックに
         速度ダンピングを足して暴れを抑えている。
@@ -269,7 +300,10 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
 
         return out
 
-    def convert_franka_force_to_omega_force(self, force_franka: np.ndarray) -> np.ndarray:
+    def convert_franka_force_to_omega_force(
+        self,
+        force_franka: np.ndarray,
+    ) -> np.ndarray:
         """
         FR3外力をOmegaに返す力に変換する。
 
@@ -362,6 +396,39 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
         msg.wrench.torque.z = 0.0
         return msg
 
+    def make_lifting_average_force_cmd(
+        self,
+        right_cmd: np.ndarray,
+        left_cmd: np.ndarray,
+    ) -> np.ndarray:
+        """
+        リフティングモード中だけ使う力覚集約。
+
+        right_cmd:
+          右FR3外力から計算された右Omega向けforce_cmd
+
+        left_cmd:
+          左FR3外力から計算された左Omega向けforce_cmd
+
+        出力:
+          Z方向のみ，左右平均を右Omegaに返す。
+          XYは安全のため0。
+        """
+        combined_cmd = np.zeros(3, dtype=float)
+
+        combined_cmd[2] = 0.5 * (
+            float(right_cmd[2])
+            + float(left_cmd[2])
+        )
+
+        combined_cmd = np.clip(
+            combined_cmd,
+            -self.force_limit,
+            self.force_limit,
+        )
+
+        return combined_cmd
+
     def publish_force_feedback_once(self) -> None:
         # q_goal側のloop_countと同期して間引く。
         # publish_every_n_loops=1 ならq_goal loopごとにforce_cmdもpublishする。
@@ -371,18 +438,49 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
         right_cmd = self.compute_force_cmd("right")
         left_cmd = self.compute_force_cmd("left")
 
+        lifting_now = bool(getattr(self, "lifting_mode", False))
+
+        # ==================================================
+        # リフティングモード中の力覚返し切り替え
+        # ==================================================
+        # 通常時:
+        #   right_cmd -> /right/force_cmd
+        #   left_cmd  -> /left/force_cmd
+        #
+        # リフティング中:
+        #   左右FR3のZ方向力覚の平均を右Omegaだけに返す。
+        #   左Omegaにはゼロをpublishする。
+        # ==================================================
+        if lifting_now and LIFTING_FORCE_FEEDBACK_MODE == "right_average":
+            right_publish_cmd = self.make_lifting_average_force_cmd(
+                right_cmd=right_cmd,
+                left_cmd=left_cmd,
+            )
+            left_publish_cmd = np.zeros(3, dtype=float)
+
+        else:
+            right_publish_cmd = right_cmd
+            left_publish_cmd = left_cmd
+
         if self.mode in ["right", "dual"]:
-            self.right_force_cmd_pub.publish(self.make_wrench_msg(right_cmd))
+            self.right_force_cmd_pub.publish(
+                self.make_wrench_msg(right_publish_cmd)
+            )
 
         if self.mode in ["left", "dual"]:
-            self.left_force_cmd_pub.publish(self.make_wrench_msg(left_cmd))
+            self.left_force_cmd_pub.publish(
+                self.make_wrench_msg(left_publish_cmd)
+            )
 
-        # loop_countは既存q_goal側が持っている想定。
         if getattr(self, "loop_count", 0) % 1000 == 0:
             self.get_logger().info(
                 "integrated force_cmd "
-                f"right={right_cmd.round(3).tolist()} "
-                f"left={left_cmd.round(3).tolist()} "
+                f"lifting={lifting_now} "
+                f"lifting_mode={LIFTING_FORCE_FEEDBACK_MODE} "
+                f"right_raw={right_cmd.round(3).tolist()} "
+                f"left_raw={left_cmd.round(3).tolist()} "
+                f"right_pub={right_publish_cmd.round(3).tolist()} "
+                f"left_pub={left_publish_cmd.round(3).tolist()} "
                 f"force_mode={self.force_mode}"
             )
 
@@ -424,7 +522,11 @@ def main() -> None:
         type=str,
         default="wrench",
         choices=["zero", "constant", "wrench"],
-        help="zero: publish zero force, constant: fixed test force, wrench: FR3 wrench feedback",
+        help=(
+            "zero: publish zero force, "
+            "constant: fixed test force, "
+            "wrench: FR3 wrench feedback"
+        ),
     )
     parser.add_argument("--fx", type=float, default=0.0)
     parser.add_argument("--fy", type=float, default=0.0)
@@ -444,7 +546,7 @@ def main() -> None:
     parser.add_argument("--omega-gravity-comp-z", type=float, default=0.0)
     parser.add_argument("--force-sign-x", type=float, default=1.0)
     parser.add_argument("--force-sign-y", type=float, default=1.0)
-    parser.add_argument("--force-sign-z", type=float, default=1.0)
+    parser.add_argument("--force-sign-z", type=float, default=-1.0)
     parser.add_argument(
         "--publish-every-n-loops",
         type=int,
@@ -455,6 +557,7 @@ def main() -> None:
     args = parser.parse_args()
 
     constant_force = np.array([args.fx, args.fy, args.fz], dtype=float)
+
     force_sign = np.array(
         [
             args.force_sign_x,
@@ -463,6 +566,7 @@ def main() -> None:
         ],
         dtype=float,
     )
+
     omega_gravity_comp = np.array(
         [
             args.omega_gravity_comp_x,
