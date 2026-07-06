@@ -20,7 +20,7 @@ OmegaDriver::OmegaDriver(int id)
 
   // ===== 追加：Omega XYZ方向力覚フィードバック設定 =====
   this->declare_parameter("force_cmd_gain", 1.0);
-  this->declare_parameter("force_cmd_limit", 0.5);
+  this->declare_parameter("force_cmd_limit", 2.0);
   this->declare_parameter("force_cmd_sign", 1.0);
 
   freq_ = this->get_parameter("frequency").as_double();
