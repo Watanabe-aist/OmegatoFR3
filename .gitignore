@@ -9,3 +9,7 @@ __pycache__/
 .cache/
 .vscode/
 .DS_Store
+
+# Bilateral experiment logs
+bilateral_logs_z/
+bilateral_logs_z_compare/

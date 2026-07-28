@@ -46,14 +46,7 @@ OMEGA_ROT_SCALE = 1.0
 # ===========================
 # 双腕ベース配置
 # ===========================
-# 共通world座標:
-#   左FR3ベースを原点とする。
-#   右FR3ベースは左FR3ベースから +X 方向に 1.0 m 離れている。
-#
-# 重要:
-#   ArmIK.get_current_ee_pose() は各FR3ベース座標系での手先位置を返す。
-#   そのまま right_pos - left_pos を取ると左右ベース間隔が反映されない。
-#   そのため、把持方向計算では以下のオフセットを足して共通world座標に変換する。
+
 LEFT_FR3_BASE_POS_WORLD = np.array([
     0.0,
     0.0,
@@ -72,7 +65,7 @@ RIGHT_FR3_BASE_POS_WORLD = np.array([
 # ===========================
 ENABLE_GRIP_POSITION_CONTROL = True
 
-GRIP_POS_SCALE = 4.0
+GRIP_POS_SCALE = 2.0
 
 # フォールバック用固定軸。
 # 通常は GRASP_ASSIST_AXIS_MODE = "between_ee_world" により，
@@ -123,8 +116,8 @@ GRASP_ASSIST_AXIS_MODE = "between_ee_world"
 # ===========================
 # 左Omegaグリッパによる左右腕中間点制御
 # ===========================
-ENABLE_RIGHT_MIDPOINT_CONTROL = False
-ENABLE_LEFT_MIDPOINT_CONTROL = False
+ENABLE_RIGHT_MIDPOINT_CONTROL = True
+ENABLE_LEFT_MIDPOINT_CONTROL = True
 
 MID_FRAME_NAME = "fr3_link5"
 
@@ -536,20 +529,7 @@ class ArmIK:
             # ==================================================
             # 右Omegaグリッパによる把持位置補正方向
             # ==================================================
-            # grip_axis_world:
-            #   共通world座標における left EE -> right EE の単位ベクトル。
-            #
-            # 前提:
-            #   左右FR3ベースは平行で同じ向き。
-            #   そのため，共通worldの方向ベクトルを各FR3ローカル座標の
-            #   補正方向としてそのまま使える。
-            #
-            # left:
-            #   +axis 方向へ動かす = 右手先/中心方向へ寄る
-            #
-            # right:
-            #   -axis 方向へ動かす = 左手先/中心方向へ寄る
-            # ==================================================
+
             if grip_axis_world is None:
                 axis = GRIP_AXIS.astype(float)
             else:
@@ -595,14 +575,7 @@ class ArmIK:
         arm_omega_state,
         left_omega_state,
     ):
-        """
-        中間リンク追加タスクを更新する。
 
-        修正版：
-        中間リンク基準位置 mid_base_pos を，
-        Omega入力から作る仮想基準ではなく，
-        現在の中間リンク実位置 current_mid_pos にする。
-        """
         if not self.enable_midpoint_control:
             return
 
@@ -612,8 +585,7 @@ class ArmIK:
         if self.mid_frame_id is None:
             return
 
-        # 中間リンク制御がTrueなら常時ON。
-        # デッドバンドでタスク自体をOFFにしない。
+
         self.mid_task_enabled_now = True
         self.mid_task_enabled_prev = True
 
@@ -720,9 +692,7 @@ class ArmIK:
         arm_omega_state,
         left_omega_state,
     ):
-        """
-        中間リンク制御の基準を現在状態に合わせる。
-        """
+
         if not self.enable_midpoint_control:
             return
 
@@ -786,12 +756,7 @@ class ArmIK:
         return err, J_task, pos_err, rot_err
 
     def compute_midpoint_nullspace_dq(self, N_task):
-        """
-        中間リンクの追加タスク。
 
-        主要タスクを打ち消さない。
-        中間リンクの軸方向の追加分だけを作る。
-        """
         if not self.enable_midpoint_control:
             return np.zeros(len(self.active_idx)), None, None, None
 
@@ -1288,20 +1253,6 @@ class OmegaToFR3QGoal(Node):
         return grip_vec / dist
 
     def compute_current_between_ee_axis(self):
-        """
-        現在の左右FR3手先位置から，
-        3次元の left EE -> right EE 単位ベクトルを計算する。
-
-        p_left_world  = LEFT_FR3_BASE_POS_WORLD  + p_left_local
-        p_right_world = RIGHT_FR3_BASE_POS_WORLD + p_right_local
-
-        axis = normalize(p_right_world - p_left_world)
-
-        このaxisを使えば，
-            left  : +axis
-            right : -axis
-        で左右が共通world座標の中心方向へ寄る。
-        """
         if self.right_arm is None or self.left_arm is None:
             return self.get_default_grip_axis()
 
@@ -1466,8 +1417,7 @@ class OmegaToFR3QGoal(Node):
             GRASP_ASSIST_MAX_OFFSET,
         ))
 
-        # grip_axis は共通worldの left -> right 方向。
-        # 左右FR3ベースは同じ向きなので，ローカルtargetにも同じ方向ベクトルを足し引きできる。
+
         left_target_pos_assisted = (
             left_target_pos
             + 0.5 * self.grasp_assist_offset * grip_axis
@@ -1588,9 +1538,7 @@ class OmegaToFR3QGoal(Node):
 
         self.reset_grasp_assist()
 
-        # 通常モードに戻るので，
-        # 右腕中間リンクは右Omega基準，
-        # 左腕中間リンクは左Omega基準へ戻す。
+
         if self.right_arm is not None:
             self.right_arm.rebase_midpoint_reference(
                 arm_omega_state=self.right_omega,
@@ -1756,20 +1704,6 @@ class OmegaToFR3QGoal(Node):
 
         right_grip_close, grip_offset = self.compute_right_grip_close_and_offset()
 
-        # ==================================================
-        # ここが今回の重要修正
-        # ==================================================
-        # 左右FR3の手先位置を共通world座標に変換し，
-        # 3次元の left EE -> right EE 方向を毎ループ計算する。
-        #
-        # axis = normalize(p_right_world - p_left_world)
-        #
-        # left target  += grip_offset * axis
-        # right target -= grip_offset * axis
-        #
-        # これにより，Y軸固定ではなく，
-        # 実際の左右手先間中心へ向かって補正する。
-        # ==================================================
         grip_axis_world = self.compute_current_between_ee_axis()
 
         if self.right_arm is not None:

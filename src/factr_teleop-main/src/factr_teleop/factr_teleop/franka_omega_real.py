@@ -2,9 +2,9 @@ import argparse
 import sys
 
 import numpy as np
-
 import rclpy
 from rclpy.node import Node
+
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from std_msgs.msg import Float64
@@ -18,12 +18,13 @@ from pylibfranka import Robot, Torques
 FORCE_SIGN = -1.0
 CONTACT_THRESHOLD = 1.0  # N
 
+
 # ===========================
 # 双腕base間オフセット
 # ===========================
 # 左Franka baseを共通world原点としたときの、右Franka baseの位置 [m]
 # ロボットが平行・同じ向きで、
-# 右Frankaが左Frankaから +X 方向に1.0 m離れている場合
+# 右Frankaが左Frankaから -Y 方向に1.0 m離れている場合
 RIGHT_BASE_OFFSET_IN_LEFT_WORLD = np.array([0.0, -1.0, 0.0], dtype=float)
 
 # もし右Frankaが左Frankaから +Y 方向に1.0 m離れているなら、上をこれに変える：
@@ -62,6 +63,17 @@ class FrankaOmegaReal(Node):
             10,
         )
 
+        # ===========================
+        # 追加：
+        # 外乱関節トルク publish
+        # record_z_force_bias_graph.py の関節トルク推定版が読むtopic
+        # ===========================
+        self.obs_franka_torque_pub = self.create_publisher(
+            JointState,
+            f"/franka/{self.name}/obs_franka_torque",
+            10,
+        )
+
         self.cmd_franka_pos_pub = self.create_publisher(
             JointState,
             f"/factr_teleop/{self.name}/cmd_franka_pos",
@@ -83,6 +95,10 @@ class FrankaOmegaReal(Node):
         )
 
         self.state_pub_count = 0
+
+        # 外乱関節トルクの属性確認用
+        self.external_torque_attr_name = None
+        self.warned_no_external_torque = False
 
         # ===========================
         # 右側プロセスだけが把持力を計算する
@@ -138,9 +154,14 @@ class FrankaOmegaReal(Node):
         self.get_logger().info(f"FrankaOmegaReal started for {self.name}")
         self.get_logger().info(f"subscribe: /omega_fr3/{self.name}/q_goal")
         self.get_logger().info(f"robot ip : {self.ip}")
-        self.get_logger().info(f"publish ee_pose        : /franka/{self.name}/ee_pose")
+        self.get_logger().info(f"publish obs_franka_state : /franka/{self.name}/obs_franka_state")
+        self.get_logger().info(f"publish obs_franka_torque: /franka/{self.name}/obs_franka_torque")
+        self.get_logger().info(f"publish ee_pose : /franka/{self.name}/ee_pose")
         self.get_logger().info(f"publish ee_wrench_world: /franka/{self.name}/ee_wrench_world")
 
+    # ======================================================
+    # callbacks / common publish
+    # ======================================================
     def q_goal_callback(self, msg):
         if len(msg.position) < 7:
             self.get_logger().warn("q_goal has less than 7 joints")
@@ -157,6 +178,7 @@ class FrankaOmegaReal(Node):
         step = np.clip(cmd - self.prev_cmd, -max_step, max_step)
         limited = self.prev_cmd + step
         self.prev_cmd = limited.copy()
+
         return limited
 
     def publish_joint_state(self, pub, q):
@@ -165,7 +187,88 @@ class FrankaOmegaReal(Node):
         msg.position = q.tolist()
         pub.publish(msg)
 
-    def publish_ee_pose_and_wrench(self, robot_state):
+    # ======================================================
+    # 追加：
+    # robot_stateから外乱関節トルクを取り出す
+    # ======================================================
+    def get_external_joint_torque(self, robot_state):
+        """
+        pylibfranka RobotState から外乱関節トルクを取り出す。
+
+        優先:
+          tau_ext_hat_filtered
+
+        それが無い場合:
+          tau_ext_hat
+
+        どちらも無い場合:
+          None を返す
+        """
+
+        candidate_attrs = [
+            "tau_ext_hat_filtered",
+            "tau_ext_hat",
+        ]
+
+        for attr in candidate_attrs:
+            if not hasattr(robot_state, attr):
+                continue
+
+            try:
+                tau = np.array(getattr(robot_state, attr), dtype=float).reshape(-1)
+            except Exception:
+                continue
+
+            if tau.shape[0] >= 7:
+                if self.external_torque_attr_name is None:
+                    self.external_torque_attr_name = attr
+                    self.get_logger().info(
+                        f"using robot_state.{attr} for /franka/{self.name}/obs_franka_torque"
+                    )
+
+                return tau[:7]
+
+        if not self.warned_no_external_torque:
+            available_tau_like_attrs = [
+                a for a in dir(robot_state)
+                if "tau" in a.lower() or "torque" in a.lower()
+            ]
+
+            self.get_logger().warn(
+                "robot_state does not have tau_ext_hat_filtered or tau_ext_hat. "
+                f"Available torque-like attributes: {available_tau_like_attrs}"
+            )
+            self.warned_no_external_torque = True
+
+        return None
+
+    def publish_external_joint_torque(self, robot_state, stamp):
+        """
+        /franka/{left/right}/obs_franka_torque をpublishする。
+        FACTR側と合わせて JointState.position に7関節分を入れる。
+        """
+
+        tau_ext = self.get_external_joint_torque(robot_state)
+
+        if tau_ext is None:
+            return
+
+        msg = JointState()
+        msg.header.stamp = stamp
+        msg.name = [
+            "joint1",
+            "joint2",
+            "joint3",
+            "joint4",
+            "joint5",
+            "joint6",
+            "joint7",
+        ]
+        msg.position = list(map(float, tau_ext[:7]))
+
+        self.obs_franka_torque_pub.publish(msg)
+
+    def publish_ee_pose_wrench_and_torque(self, robot_state):
         self.state_pub_count += 1
 
         # 1000Hzで出すと重いので、100Hz程度に落とす
@@ -174,6 +277,9 @@ class FrankaOmegaReal(Node):
 
         now = self.get_clock().now().to_msg()
 
+        # ---------------------------
+        # EE pose publish
+        # ---------------------------
         # O_T_EE: 各Franka baseから見たEE姿勢
         # libfrankaはcolumn-majorなので位置は 12,13,14
         T = np.array(robot_state.O_T_EE, dtype=float)
@@ -198,6 +304,9 @@ class FrankaOmegaReal(Node):
 
         self.ee_pose_pub.publish(pose_msg)
 
+        # ---------------------------
+        # EE wrench publish
+        # ---------------------------
         # Franka APIの手先外力推定
         wrench = np.array(robot_state.O_F_ext_hat_K, dtype=float)
 
@@ -218,36 +327,54 @@ class FrankaOmegaReal(Node):
 
         self.ee_wrench_pub.publish(wrench_msg)
 
-    # ===========================
+        # ---------------------------
+        # 追加：
+        # external joint torque publish
+        # ---------------------------
+        self.publish_external_joint_torque(robot_state, now)
+
+    # ======================================================
     # 右ノードだけが使うcallback
-    # ===========================
+    # ======================================================
     def left_pose_callback(self, msg):
-        self.p_left = np.array([
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
-        ], dtype=float)
+        self.p_left = np.array(
+            [
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z,
+            ],
+            dtype=float,
+        )
 
     def right_pose_callback(self, msg):
-        self.p_right = np.array([
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
-        ], dtype=float)
+        self.p_right = np.array(
+            [
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z,
+            ],
+            dtype=float,
+        )
 
     def left_wrench_callback(self, msg):
-        self.f_left = np.array([
-            msg.wrench.force.x,
-            msg.wrench.force.y,
-            msg.wrench.force.z,
-        ], dtype=float)
+        self.f_left = np.array(
+            [
+                msg.wrench.force.x,
+                msg.wrench.force.y,
+                msg.wrench.force.z,
+            ],
+            dtype=float,
+        )
 
     def right_wrench_callback(self, msg):
-        self.f_right = np.array([
-            msg.wrench.force.x,
-            msg.wrench.force.y,
-            msg.wrench.force.z,
-        ], dtype=float)
+        self.f_right = np.array(
+            [
+                msg.wrench.force.x,
+                msg.wrench.force.y,
+                msg.wrench.force.z,
+            ],
+            dtype=float,
+        )
 
     def compute_and_publish_grip_force(self):
         if self.name != "right":
@@ -313,6 +440,7 @@ class FrankaOmegaReal(Node):
         self.grip_force_pub.publish(msg)
 
         self.grip_log_count += 1
+
         if self.grip_log_count % 20 == 0:
             self.get_logger().info(
                 f"pL_world=[{p_left_world[0]:.3f}, {p_left_world[1]:.3f}, {p_left_world[2]:.3f}], "
@@ -324,9 +452,18 @@ class FrankaOmegaReal(Node):
                 f"F_grip={f_grip:.2f} N"
             )
 
+    # ======================================================
+    # main control loop
+    # ======================================================
     def run(self):
-        joint_stiffness = np.array([90, 90, 90, 30, 30, 30, 30], dtype=float)
-        joint_damping = np.array([2.5 * np.sqrt(k) for k in joint_stiffness])
+        joint_stiffness = np.array(
+            [90, 90, 90, 30, 30, 30, 30],
+            dtype=float,
+        )
+        joint_damping = np.array(
+            [2.5 * np.sqrt(k) for k in joint_stiffness],
+            dtype=float,
+        )
 
         robot = None
 
@@ -357,13 +494,15 @@ class FrankaOmegaReal(Node):
                 robot_state, _ = active_control.readOnce()
 
                 coriolis = np.array(model.coriolis(robot_state))
+
                 q = np.array(robot_state.q)
                 dq = np.array(robot_state.dq)
 
+                # 現在関節角度をpublish
                 self.publish_joint_state(self.obs_franka_state_pub, q)
 
-                # 自分のEE位置と外力をpublish
-                self.publish_ee_pose_and_wrench(robot_state)
+                # 自分のEE位置・手先外力・外乱関節トルクをpublish
+                self.publish_ee_pose_wrench_and_torque(robot_state)
 
                 if self.q_goal is None:
                     continue
@@ -386,7 +525,7 @@ class FrankaOmegaReal(Node):
 
                     tau_task[i] = (
                         -joint_stiffness[i] * position_error[i]
-                        -joint_damping[i] * dq[i]
+                        - joint_damping[i] * dq[i]
                     )
 
                 tau_d = tau_task + coriolis
@@ -409,17 +548,20 @@ class FrankaOmegaReal(Node):
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--name",
         type=str,
         default="right",
         help="Robot name: left or right",
     )
+
     args = parser.parse_args()
 
     rclpy.init()
 
     node = FrankaOmegaReal(args.name)
+
     ret = node.run()
 
     node.destroy_node()

@@ -1,32 +1,4 @@
 #!/usr/bin/env python3
-"""
-omega_to_fr3_q_goal_dual_bilateral.py
-
-目的:
-  既存の omega_to_fr3_q_goal_dual.py の q_goal 制御に，
-  FR3外力 -> Omega力覚返しを同じROSノード内で統合する。
-  FACTRを参考に，Omega速度に対するダンピングと任意の重力/バイアス補償を加える。
-
-通常モード:
-  右FR3のZ方向外力 -> 右OmegaのZ方向へ返す
-  左FR3のZ方向外力 -> 左OmegaのZ方向へ返す
-
-リフティングモード:
-  右FR3のZ方向外力と左FR3のZ方向外力の平均を右Omegaへ返す
-  左Omegaには0を返す
-
-使い方:
-  1. このファイルを ~/franka_ros2_ws/test_scripts/ に置く
-  2. 既存の omega_to_fr3_q_goal_dual.py は親クラスとして残す
-  3. franka_wrench_to_omega_force_cmd.py は起動しない
-  4. 以下を実行:
-       python3 ~/franka_ros2_ws/test_scripts/omega_to_fr3_q_goal_dual_bilateral.py --name dual --force-mode wrench --force-sign-z -1.0
-
-注意:
-  - Omega driver right/left は今まで通り別ターミナルで起動する。
-  - franka_omega_real.py right/left も今まで通り別ターミナルで起動する。
-  - force_cmd はこのノードが /right/force_cmd, /left/force_cmd に出す。
-"""
 
 import argparse
 import numpy as np
@@ -92,16 +64,7 @@ class ForceBiasEstimator:
 
 
 class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
-    """
-    q_goal制御とFR3外力->Omega力覚返しを同じノードにまとめたFACTR参考版。
 
-    ポイント:
-      - 既存の OmegaToFR3QGoal.loop() を呼んだ直後に force_cmd をpublishする。
-      - そのため，q_goalとforce_cmdは同じPythonプロセス，同じROSノード，同じ制御周期側で動く。
-      - もう franka_wrench_to_omega_force_cmd.py は起動しない。
-      - FACTRの torque_feedback と同じ考えで，力覚に速度ダンピングを入れる。
-      - リフティング中だけ左右Z力覚の平均を右Omegaへ集約する。
-    """
 
     def __init__(
         self,
@@ -534,12 +497,12 @@ def main() -> None:
 
     parser.add_argument("--enable-xy-force", action="store_true")
     parser.add_argument("--force-gain-xy", type=float, default=0.08)
-    parser.add_argument("--force-gain-z", type=float, default=0.08)
-    parser.add_argument("--force-limit", type=float, default=0.8)
+    parser.add_argument("--force-gain-z", type=float, default=0.12)
+    parser.add_argument("--force-limit", type=float, default=1.5)
     parser.add_argument("--force-deadband", type=float, default=0.2)
-    parser.add_argument("--lpf-alpha", type=float, default=0.20)
+    parser.add_argument("--lpf-alpha", type=float, default=0.40)
     parser.add_argument("--bias-samples", type=int, default=200)
-    parser.add_argument("--force-damping-xy", type=float, default=0.0)
+    parser.add_argument("--force-damping-xy", type=float, default=0.15)
     parser.add_argument("--force-damping-z", type=float, default=0.15)
     parser.add_argument("--omega-gravity-comp-x", type=float, default=0.0)
     parser.add_argument("--omega-gravity-comp-y", type=float, default=0.0)

@@ -47,6 +47,8 @@ protected:
 
   bool sendCommandToOmega(const ohrc_msgs::msg::State &omega) override {
     // 右FR3手先Z方向力を右Omega本体Z方向へ返す
+    double fx_cmd = omega.wrench.force.x;
+    double fy_cmd = omega.wrench.force.y;
     double fz_cmd = omega.wrench.force.z;
 
     if (!enable_ee_z_feedback_for("right")) {
@@ -57,8 +59,8 @@ protected:
     // Fx, Fy, torqueは0
     // gripper.forceは今まで通り右グリッパ把持反力
     int rc = dhdSetForceAndTorqueAndGripperForce(
-      0.0,
-      0.0,
+      fx_cmd,
+      fy_cmd,
       fz_cmd,
       0.0,
       0.0,
