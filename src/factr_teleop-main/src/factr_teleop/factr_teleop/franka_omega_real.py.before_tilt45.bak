@@ -27,53 +27,6 @@ CONTACT_THRESHOLD = 1.0  # N
 # 右Frankaが左Frankaから -Y 方向に1.0 m離れている場合
 RIGHT_BASE_OFFSET_IN_LEFT_WORLD = np.array([0.0, -1.0, 0.0], dtype=float)
 
-
-# ===========================
-# FR3ベース取付姿勢
-# ===========================
-#
-# logical name / IP対応は従来のまま:
-#
-# left  -> 192.168.2.121 -> +45 deg
-# right -> 192.168.2.122 -> -45 deg
-#
-# O_F_ext_hat_K は各FR3 base座標なので、
-# ee_wrench_worldへ出す前にcommon worldへ回転する。
-LEFT_FR3_BASE_ROLL_RAD = np.deg2rad(+45.0)
-RIGHT_FR3_BASE_ROLL_RAD = np.deg2rad(-45.0)
-
-
-def rot_x(theta):
-    c = np.cos(theta)
-    s = np.sin(theta)
-
-    return np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, -s],
-        [0.0, s, c],
-    ], dtype=float)
-
-
-LEFT_FR3_BASE_ROT_WORLD = rot_x(
-    LEFT_FR3_BASE_ROLL_RAD
-)
-
-RIGHT_FR3_BASE_ROT_WORLD = rot_x(
-    RIGHT_FR3_BASE_ROLL_RAD
-)
-
-
-def get_fr3_base_rot_world(side):
-    if side == "left":
-        return LEFT_FR3_BASE_ROT_WORLD
-
-    if side == "right":
-        return RIGHT_FR3_BASE_ROT_WORLD
-
-    return np.eye(3)
-
-
-
 # もし右Frankaが左Frankaから +Y 方向に1.0 m離れているなら、上をこれに変える：
 # RIGHT_BASE_OFFSET_IN_LEFT_WORLD = np.array([0.0, 1.0, 0.0], dtype=float)
 
@@ -354,40 +307,26 @@ class FrankaOmegaReal(Node):
         # ---------------------------
         # EE wrench publish
         # ---------------------------
-        # O_F_ext_hat_K は各FR3 base座標。
-        # ±45deg mountingを反映してcommon worldへ回す。
-        wrench_base = np.array(
-            robot_state.O_F_ext_hat_K,
-            dtype=float,
-        )
-
-        R_world_base = get_fr3_base_rot_world(
-            self.name
-        )
-
-        force_world = (
-            R_world_base
-            @ wrench_base[:3]
-        )
-
-        torque_world = (
-            R_world_base
-            @ wrench_base[3:6]
-        )
+        # Franka APIの手先外力推定
+        wrench = np.array(robot_state.O_F_ext_hat_K, dtype=float)
 
         wrench_msg = WrenchStamped()
         wrench_msg.header.stamp = now
+
+        # 左右ロボットが平行・同じ向きなら、
+        # 力ベクトルの向きは同じ座標軸として扱える。
         wrench_msg.header.frame_id = "world"
 
-        wrench_msg.wrench.force.x = float(force_world[0])
-        wrench_msg.wrench.force.y = float(force_world[1])
-        wrench_msg.wrench.force.z = float(force_world[2])
+        wrench_msg.wrench.force.x = float(wrench[0])
+        wrench_msg.wrench.force.y = float(wrench[1])
+        wrench_msg.wrench.force.z = float(wrench[2])
 
-        wrench_msg.wrench.torque.x = float(torque_world[0])
-        wrench_msg.wrench.torque.y = float(torque_world[1])
-        wrench_msg.wrench.torque.z = float(torque_world[2])
+        wrench_msg.wrench.torque.x = float(wrench[3])
+        wrench_msg.wrench.torque.y = float(wrench[4])
+        wrench_msg.wrench.torque.z = float(wrench[5])
 
         self.ee_wrench_pub.publish(wrench_msg)
+
         # ---------------------------
         # 追加：
         # external joint torque publish
@@ -463,16 +402,9 @@ class FrankaOmegaReal(Node):
         # 右手先位置にbase間オフセットを加えて、
         # 左Franka基準の共通world座標へ変換する。
         # ==================================================
-        p_left_world = (
-            LEFT_FR3_BASE_ROT_WORLD
-            @ self.p_left
-        )
+        p_left_world = self.p_left
+        p_right_world = self.p_right + RIGHT_BASE_OFFSET_IN_LEFT_WORLD
 
-        p_right_world = (
-            RIGHT_BASE_OFFSET_IN_LEFT_WORLD
-            + RIGHT_FR3_BASE_ROT_WORLD
-            @ self.p_right
-        )
         diff = p_right_world - p_left_world
         dist = np.linalg.norm(diff)
 

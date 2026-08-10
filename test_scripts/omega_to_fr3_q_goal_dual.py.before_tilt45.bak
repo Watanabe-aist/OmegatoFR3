@@ -60,90 +60,6 @@ RIGHT_FR3_BASE_POS_WORLD = np.array([
 ])
 
 
-
-
-# ===========================
-# FR3ベース取付姿勢
-# ===========================
-#
-# logical name / IP対応は従来のまま:
-#
-# left:
-#   192.168.2.121
-#   Desk API roll = +45 deg
-#
-# right:
-#   192.168.2.122
-#   Desk API roll = -45 deg
-#
-# Pinocchio / IK は各FR3 base座標。
-# Omega操作・双腕把持・liftingでは
-# common worldとの固定回転を明示的に扱う。
-LEFT_FR3_BASE_ROLL_RAD = np.deg2rad(+45.0)
-RIGHT_FR3_BASE_ROLL_RAD = np.deg2rad(-45.0)
-
-
-def rot_x(theta):
-    c = np.cos(theta)
-    s = np.sin(theta)
-
-    return np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, -s],
-        [0.0, s, c],
-    ], dtype=float)
-
-
-# 各FR3 base -> common world
-LEFT_FR3_BASE_ROT_WORLD = rot_x(
-    LEFT_FR3_BASE_ROLL_RAD
-)
-
-RIGHT_FR3_BASE_ROT_WORLD = rot_x(
-    RIGHT_FR3_BASE_ROLL_RAD
-)
-
-
-def get_fr3_base_rot_world(side):
-    if side == "left":
-        return LEFT_FR3_BASE_ROT_WORLD
-
-    if side == "right":
-        return RIGHT_FR3_BASE_ROT_WORLD
-
-    return np.eye(3)
-
-
-def local_vector_to_common_world(
-    side,
-    vec_local,
-):
-    vec_local = np.asarray(
-        vec_local,
-        dtype=float,
-    )
-
-    return (
-        get_fr3_base_rot_world(side)
-        @ vec_local
-    )
-
-
-def common_world_vector_to_local(
-    side,
-    vec_world,
-):
-    vec_world = np.asarray(
-        vec_world,
-        dtype=float,
-    )
-
-    return (
-        get_fr3_base_rot_world(side).T
-        @ vec_world
-    )
-
-
 # ===========================
 # 右Omegaグリッパによる双腕把持設定
 # ===========================
@@ -247,37 +163,43 @@ LOG_INTERVAL = 10
 # ==========================================================
 # 右Omega用：Omega位置座標 → FR3位置座標
 # ==========================================================
-RIGHT_OMEGA_TO_FR3_POS = (
-    RIGHT_FR3_BASE_ROT_WORLD.T
-)
+RIGHT_OMEGA_TO_FR3_POS = np.array([
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+
+
 # ==========================================================
 # 左Omega用：Omega位置座標 → FR3位置座標
 # ==========================================================
-LEFT_OMEGA_TO_FR3_POS = (
-    LEFT_FR3_BASE_ROT_WORLD.T
-)
+LEFT_OMEGA_TO_FR3_POS = np.array([
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+
+
 # ==========================================================
 # 右Omega用：Omega回転軸 → FR3回転軸
 # ==========================================================
-RIGHT_OMEGA_TO_FR3_ROT = (
-    RIGHT_FR3_BASE_ROT_WORLD.T
-    @ np.array([
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-)
+RIGHT_OMEGA_TO_FR3_ROT = np.array([
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+
+
 # ==========================================================
 # 左Omega用：Omega回転軸 → FR3回転軸
 # ==========================================================
-LEFT_OMEGA_TO_FR3_ROT = (
-    LEFT_FR3_BASE_ROT_WORLD.T
-    @ np.array([
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-)
+LEFT_OMEGA_TO_FR3_ROT = np.array([
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+])
+
+
 # ==========================================================
 # 右Omega用：回転方向の符号
 # ==========================================================
@@ -626,19 +548,11 @@ class ArmIK:
             else:
                 axis = axis / axis_norm
 
-
-            # axisはcommon world座標。
-            # target_posは各FR3 base座標。
-            axis_local = common_world_vector_to_local(
-                self.arm_name,
-                axis,
-            )
-
             if self.arm_name == "left":
-                self.target_pos = self.target_pos + grip_offset * axis_local
+                self.target_pos = self.target_pos + grip_offset * axis
 
             elif self.arm_name == "right":
-                self.target_pos = self.target_pos - grip_offset * axis_local
+                self.target_pos = self.target_pos - grip_offset * axis
 
         R_delta_omega = omega_state.initial_rot.T @ omega_state.rot
 
@@ -695,20 +609,12 @@ class ArmIK:
         else:
             axis = axis / axis_norm
 
-
-        # MIDPOINT_AXISはcommon world座標。
-        # Pinocchio目標は各FR3 base座標。
-        axis_local = common_world_vector_to_local(
-            self.arm_name,
-            axis,
-        )
-
         if self.arm_name == "right":
-            signed_axis = -axis_local
+            signed_axis = -axis
         elif self.arm_name == "left":
-            signed_axis = axis_local
+            signed_axis = axis
         else:
-            signed_axis = axis_local
+            signed_axis = axis
 
         self.mid_signed_axis = signed_axis
 
@@ -1290,59 +1196,25 @@ class OmegaToFR3QGoal(Node):
     # ------------------------------------------------------
     # Dual-arm world/local transform utilities
     # ------------------------------------------------------
-    def local_to_common_world(
-        self,
-        side,
-        pos_local,
-    ):
-        pos_local = np.asarray(
-            pos_local,
-            dtype=float,
-        )
+    def local_to_common_world(self, side, pos_local):
+        pos_local = np.asarray(pos_local, dtype=float)
 
         if side == "right":
-            return (
-                RIGHT_FR3_BASE_POS_WORLD
-                + RIGHT_FR3_BASE_ROT_WORLD
-                @ pos_local
-            )
+            return RIGHT_FR3_BASE_POS_WORLD + pos_local
 
         if side == "left":
-            return (
-                LEFT_FR3_BASE_POS_WORLD
-                + LEFT_FR3_BASE_ROT_WORLD
-                @ pos_local
-            )
+            return LEFT_FR3_BASE_POS_WORLD + pos_local
 
         return pos_local.copy()
 
-    def common_world_to_local(
-        self,
-        side,
-        pos_world,
-    ):
-        pos_world = np.asarray(
-            pos_world,
-            dtype=float,
-        )
+    def common_world_to_local(self, side, pos_world):
+        pos_world = np.asarray(pos_world, dtype=float)
 
         if side == "right":
-            return (
-                RIGHT_FR3_BASE_ROT_WORLD.T
-                @ (
-                    pos_world
-                    - RIGHT_FR3_BASE_POS_WORLD
-                )
-            )
+            return pos_world - RIGHT_FR3_BASE_POS_WORLD
 
         if side == "left":
-            return (
-                LEFT_FR3_BASE_ROT_WORLD.T
-                @ (
-                    pos_world
-                    - LEFT_FR3_BASE_POS_WORLD
-                )
-            )
+            return pos_world - LEFT_FR3_BASE_POS_WORLD
 
         return pos_world.copy()
 
@@ -1546,24 +1418,14 @@ class OmegaToFR3QGoal(Node):
         ))
 
 
-        left_grip_axis_local = common_world_vector_to_local(
-            "left",
-            grip_axis,
-        )
-
-        right_grip_axis_local = common_world_vector_to_local(
-            "right",
-            grip_axis,
-        )
-
         left_target_pos_assisted = (
             left_target_pos
-            + 0.5 * self.grasp_assist_offset * left_grip_axis_local
+            + 0.5 * self.grasp_assist_offset * grip_axis
         )
 
         right_target_pos_assisted = (
             right_target_pos
-            - 0.5 * self.grasp_assist_offset * right_grip_axis_local
+            - 0.5 * self.grasp_assist_offset * grip_axis
         )
 
         if self.loop_count % 500 == 0:
@@ -1721,13 +1583,7 @@ class OmegaToFR3QGoal(Node):
         delta_omega = self.right_omega.pos - self.lift_omega_initial_pos
         delta_fr3 = omega_to_fr3_pos @ delta_omega
 
-        center_delta_world = (
-            OMEGA_POS_SCALE
-            * local_vector_to_common_world(
-                "right",
-                delta_fr3,
-            )
-        )
+        center_delta_world = OMEGA_POS_SCALE * delta_fr3
         center_target_world = self.lift_center_pos0 + center_delta_world
 
         if LIFTING_MODE_USE_RIGHT_OMEGA_ROT:

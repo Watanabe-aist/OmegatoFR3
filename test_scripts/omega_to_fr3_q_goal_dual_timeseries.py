@@ -14,8 +14,8 @@ import omega_to_fr3_q_goal_dual_bilateral as bilateral
 # 既存機能の設定
 # ==========================================================
 # 左Omegaグリッパから左右両方の中間リンク目標を生成する。
-base.ENABLE_RIGHT_MIDPOINT_CONTROL = True
-base.ENABLE_LEFT_MIDPOINT_CONTROL = True
+base.ENABLE_RIGHT_MIDPOINT_CONTROL = False
+base.ENABLE_LEFT_MIDPOINT_CONTROL = False
 
 
 # ==========================================================
