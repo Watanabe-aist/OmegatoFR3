@@ -55,7 +55,7 @@ LEFT_FR3_BASE_POS_WORLD = np.array([
 
 RIGHT_FR3_BASE_POS_WORLD = np.array([
     0.0,
-    1.0,
+    0.50,
     0.0,
 ])
 
@@ -259,26 +259,18 @@ LEFT_OMEGA_TO_FR3_POS = (
 # ==========================================================
 # 右Omega用：Omega回転軸 → FR3回転軸
 # ==========================================================
-RIGHT_OMEGA_TO_FR3_ROT = (
-    RIGHT_FR3_BASE_ROT_WORLD.T
-    @ np.array([
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-)
+RIGHT_OMEGA_TO_FR3_ROT = np.array([
+    [ 0.0,  1.0, 0.0],
+    [-1.0,  0.0, 0.0],
+    [ 0.0,  0.0, -1.0],
+])
+# 左Omega用：Omega回転軸 → common WORLD回転軸
 # ==========================================================
-# 左Omega用：Omega回転軸 → FR3回転軸
-# ==========================================================
-LEFT_OMEGA_TO_FR3_ROT = (
-    LEFT_FR3_BASE_ROT_WORLD.T
-    @ np.array([
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-)
-# ==========================================================
+LEFT_OMEGA_TO_FR3_ROT = np.array([
+    [ -1.0,  0.0, 0.0],
+    [0.0,  1.0, 0.0],
+    [ 0.0,  0.0, 1.0],
+])
 # 右Omega用：回転方向の符号
 # ==========================================================
 RIGHT_OMEGA_ROT_SIGN = np.array([
@@ -293,8 +285,8 @@ RIGHT_OMEGA_ROT_SIGN = np.array([
 # ==========================================================
 LEFT_OMEGA_ROT_SIGN = np.array([
    -1.0,
-   -1.0,
-   -1.0,
+    1.0,
+    1.0,
 ])
 
 
@@ -640,19 +632,75 @@ class ArmIK:
             elif self.arm_name == "right":
                 self.target_pos = self.target_pos - grip_offset * axis_local
 
-        R_delta_omega = omega_state.initial_rot.T @ omega_state.rot
+        # ==================================================
+        # WORLD-fixed Roll / Pitch / Yaw
+        # ==================================================
+        #
+        # Omega orientation difference expressed about
+        # the fixed Omega/world axes:
+        #
+        #     R_delta = R_now @ R_initial.T
+        #
+        # ==================================================
+        # common WORLD 固定軸 Roll / Pitch / Yaw
+        # ==================================================
+        # ==================================================
+        # WORLD-fixed Roll / Pitch / Yaw
+        # Use the exact same WORLD -> FR3-base transform as XYZ.
+        # ==================================================
 
-        rot_vec_omega = pin.log3(R_delta_omega)
+        # Omega relative orientation, expressed about fixed Omega/WORLD axes.
+        # ==================================================
+        # Rotation mapping
+        # ==================================================
 
-        rot_vec_fr3 = omega_to_fr3_rot @ rot_vec_omega
-
-        rot_vec_fr3 = OMEGA_ROT_SCALE * (
-            omega_rot_sign * rot_vec_fr3
+        # 1) Omegaの物理Roll/Pitch/Yawを
+        #    Omega初期姿勢基準のlocal/body相対回転として取得。
+        #    1軸入力を1軸のまま保持する。
+        R_delta_omega = (
+            omega_state.initial_rot.T
+            @ omega_state.rot
         )
 
-        R_delta_mapped = pin.exp3(rot_vec_fr3)
+        rot_vec_omega = pin.log3(
+            R_delta_omega
+        )
 
-        self.target_rot = self.fr3_initial_rot @ R_delta_mapped
+        # 2) Omega物理軸 -> common WORLD軸
+        #
+        # ここではFR3 baseの±45deg補正を行わない。
+        # Roll/Pitch交換と左右別の符号だけを扱う。
+        rot_vec_world = (
+            omega_to_fr3_rot
+            @ rot_vec_omega
+        )
+
+        rot_vec_world = OMEGA_ROT_SCALE * (
+            omega_rot_sign
+            * rot_vec_world
+        )
+
+        # 3) Rotation does NOT use the ±45deg translation/base
+        #    compensation.
+        #
+        # Translation keeps:
+        #   delta_fr3 = omega_to_fr3_pos @ delta_omega
+        #
+        # Rotation bypasses the ±45deg compensation.
+        rot_vec_fr3 = (
+            rot_vec_world.copy()
+        )
+
+        R_delta_fr3 = pin.exp3(
+            rot_vec_fr3
+        )
+
+        # 4) rot_vec_fr3はFR3 base固定軸表現。
+        #    そのため初期EE姿勢の左から掛ける。
+        self.target_rot = (
+            R_delta_fr3
+            @ self.fr3_initial_rot
+        )
 
         return True
 
