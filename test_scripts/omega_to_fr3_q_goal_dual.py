@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import WrenchStamped
+from std_msgs.msg import Float64
 
 import pinocchio as pin
 
@@ -179,13 +180,20 @@ ENABLE_GRASP_ASSIST = True
 RIGHT_EE_WRENCH_TOPIC = "/franka/right/ee_wrench_world"
 LEFT_EE_WRENCH_TOPIC = "/franka/left/ee_wrench_world"
 
+# franka_omega_real.py と実験loggerで共通利用する把持力
+GRIP_FORCE_TOPIC = "/dual_grip/grip_force"
+
+# Experiment-1 logging: actual internal assist command.
+GRASP_ASSIST_OFFSET_TOPIC = "/dual_grip/grasp_assist_offset"
+GRASP_ASSIST_OFFSET_PUBLISH_DT = 0.01  # 100 Hz
+
 FRANKA_FORCE_SIGN = -1.0
 
 GRASP_FORCE_MARGIN_N = 0.3
 GRASP_FORCE_LPF_ALPHA = 0.05
-GRASP_ASSIST_KI = 0.0006
-GRASP_ASSIST_MAX_STEP = 0.000005
-GRASP_ASSIST_MAX_OFFSET = 0.005
+GRASP_ASSIST_KI = 0.01
+GRASP_ASSIST_MAX_STEP = 0.005
+GRASP_ASSIST_MAX_OFFSET = 0.1
 GRASP_FORCE_DEADBAND_N = 0.2
 
 # "between_ee_world":
@@ -687,8 +695,9 @@ class ArmIK:
         #   delta_fr3 = omega_to_fr3_pos @ delta_omega
         #
         # Rotation bypasses the ±45deg compensation.
-        rot_vec_fr3 = (
-            rot_vec_world.copy()
+        rot_vec_fr3 = common_world_vector_to_local(
+            self.arm_name,
+            rot_vec_world,
         )
 
         R_delta_fr3 = pin.exp3(
@@ -1128,8 +1137,20 @@ class OmegaToFR3QGoal(Node):
         self.left_force_received = False
 
         self.grasp_force_filtered = 0.0
+        self.grip_force_input_n = 0.0
+        self.grip_force_received = False
         self.grasp_force_target = None
         self.grasp_assist_offset = 0.0
+
+        self.grasp_assist_offset_pub = self.create_publisher(
+            Float64,
+            GRASP_ASSIST_OFFSET_TOPIC,
+            10,
+        )
+        self.grasp_assist_offset_timer = self.create_timer(
+            GRASP_ASSIST_OFFSET_PUBLISH_DT,
+            self.publish_grasp_assist_offset,
+        )
 
         self.grasp_assist_waiting_logged = False
 
@@ -1144,6 +1165,13 @@ class OmegaToFR3QGoal(Node):
             WrenchStamped,
             LEFT_EE_WRENCH_TOPIC,
             self.left_wrench_callback,
+            10,
+        )
+
+        self.create_subscription(
+            Float64,
+            GRIP_FORCE_TOPIC,
+            self.grip_force_callback,
             10,
         )
 
@@ -1307,6 +1335,10 @@ class OmegaToFR3QGoal(Node):
             msg,
             "left",
         )
+
+    def grip_force_callback(self, msg):
+        self.grip_force_input_n = max(0.0, float(msg.data))
+        self.grip_force_received = True
 
     def right_wrench_callback(self, msg):
         self.right_force_world = np.array([
@@ -1502,6 +1534,14 @@ class OmegaToFR3QGoal(Node):
 
         return grip_force, grip_axis, left_inward_force, right_inward_force
 
+    def publish_grasp_assist_offset(self):
+        msg = Float64()
+        if ENABLE_GRASP_ASSIST:
+            msg.data = float(self.grasp_assist_offset)
+        else:
+            msg.data = 0.0
+        self.grasp_assist_offset_pub.publish(msg)
+
     def reset_grasp_assist(self):
         self.grasp_force_filtered = 0.0
         self.grasp_force_target = None
@@ -1512,34 +1552,38 @@ class OmegaToFR3QGoal(Node):
         if not ENABLE_GRASP_ASSIST:
             return False
 
-        grip_info = self.compute_grip_force_from_wrench(
-            right_pos=right_pos,
-            left_pos=left_pos,
-        )
-
-        if grip_info is None:
+        if not self.grip_force_received:
             if not self.grasp_assist_waiting_logged:
                 self.get_logger().warn(
-                    "GRASP ASSIST INIT: wrench not received yet"
+                    "GRASP ASSIST INIT: "
+                    f"{GRIP_FORCE_TOPIC} not received yet"
                 )
                 self.grasp_assist_waiting_logged = True
-
             return False
 
-        grip_force, grip_axis, left_inward, right_inward = grip_info
+        grip_force = max(0.0, float(self.grip_force_input_n))
+
+        if right_pos is not None and left_pos is not None:
+            grip_axis = self.get_grasp_axis_from_local_positions(
+                right_pos_local=right_pos,
+                left_pos_local=left_pos,
+            )
+        else:
+            grip_axis = self.compute_current_between_ee_axis()
 
         self.grasp_force_filtered = grip_force
-        self.grasp_force_target = grip_force + GRASP_FORCE_MARGIN_N
+        self.grasp_force_target = (
+            grip_force + GRASP_FORCE_MARGIN_N
+        )
         self.grasp_assist_offset = 0.0
         self.grasp_assist_waiting_logged = False
 
         self.get_logger().info(
             "GRASP ASSIST INIT: "
+            f"source={GRIP_FORCE_TOPIC}, "
             f"F_grip={grip_force:.3f} N, "
             f"F_target={self.grasp_force_target:.3f} N, "
-            f"axis={grip_axis.round(3).tolist()}, "
-            f"F_L_in={left_inward:.3f} N, "
-            f"F_R_in={right_inward:.3f} N"
+            f"axis={grip_axis.round(3).tolist()}"
         )
 
         return True
@@ -1557,27 +1601,51 @@ class OmegaToFR3QGoal(Node):
             if not initialized:
                 return right_target_pos, left_target_pos
 
-        grip_info = self.compute_grip_force_from_wrench(
-            right_pos=right_target_pos,
-            left_pos=left_target_pos,
-        )
-
-        if grip_info is None:
+        if not self.grip_force_received:
             return right_target_pos, left_target_pos
 
-        grip_force, grip_axis, left_inward, right_inward = grip_info
-
-        self.grasp_force_filtered = (
-            (1.0 - GRASP_FORCE_LPF_ALPHA) * self.grasp_force_filtered
-            + GRASP_FORCE_LPF_ALPHA * grip_force
+        grip_force_raw = max(
+            0.0,
+            float(self.grip_force_input_n),
         )
 
-        force_error = self.grasp_force_target - self.grasp_force_filtered
+        # 把持方向だけは左右手先の幾何から求める。
+        # 力の大きさは /dual_grip/grip_force からのみ取得する。
+        grip_axis = self.get_grasp_axis_from_local_positions(
+            right_pos_local=right_target_pos,
+            left_pos_local=left_target_pos,
+        )
+
+        # WORLDで求めた把持方向を，各FR3のbase/local座標へ変換する。
+        left_grip_axis_local = common_world_vector_to_local(
+            "left",
+            grip_axis,
+        )
+        right_grip_axis_local = common_world_vector_to_local(
+            "right",
+            grip_axis,
+        )
+
+        self.grasp_force_filtered = (
+            (1.0 - GRASP_FORCE_LPF_ALPHA)
+            * self.grasp_force_filtered
+            + GRASP_FORCE_LPF_ALPHA
+            * grip_force_raw
+        )
+
+        force_error = (
+            self.grasp_force_target
+            - self.grasp_force_filtered
+        )
 
         if abs(force_error) < GRASP_FORCE_DEADBAND_N:
             force_error = 0.0
 
-        offset_step = GRASP_ASSIST_KI * force_error * CONTROL_DT
+        offset_step = (
+            GRASP_ASSIST_KI
+            * force_error
+            * CONTROL_DT
+        )
 
         offset_step = float(np.clip(
             offset_step,
@@ -1593,37 +1661,30 @@ class OmegaToFR3QGoal(Node):
             GRASP_ASSIST_MAX_OFFSET,
         ))
 
-
-        left_grip_axis_local = common_world_vector_to_local(
-            "left",
-            grip_axis,
-        )
-
-        right_grip_axis_local = common_world_vector_to_local(
-            "right",
-            grip_axis,
-        )
-
         left_target_pos_assisted = (
             left_target_pos
-            + 0.5 * self.grasp_assist_offset * left_grip_axis_local
+            + 0.5
+            * self.grasp_assist_offset
+            * left_grip_axis_local
         )
 
         right_target_pos_assisted = (
             right_target_pos
-            - 0.5 * self.grasp_assist_offset * right_grip_axis_local
+            - 0.5
+            * self.grasp_assist_offset
+            * right_grip_axis_local
         )
 
         if self.loop_count % 500 == 0:
             self.get_logger().info(
                 "GRASP ASSIST: "
-                f"F={self.grasp_force_filtered:.3f} N, "
+                f"source={GRIP_FORCE_TOPIC}, "
+                f"F_raw={grip_force_raw:.3f} N, "
+                f"F_filtered={self.grasp_force_filtered:.3f} N, "
                 f"F_target={self.grasp_force_target:.3f} N, "
                 f"err={force_error:.3f} N, "
                 f"offset={self.grasp_assist_offset*1000.0:.2f} mm, "
-                f"axis={grip_axis.round(3).tolist()}, "
-                f"F_L_in={left_inward:.3f} N, "
-                f"F_R_in={right_inward:.3f} N"
+                f"axis={grip_axis.round(3).tolist()}"
             )
 
         return right_target_pos_assisted, left_target_pos_assisted

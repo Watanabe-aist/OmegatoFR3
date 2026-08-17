@@ -49,6 +49,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pinocchio as pin
 import rclpy
 from rclpy.node import Node
 
@@ -63,6 +64,7 @@ from ohrc_msgs.msg import State
 # ============================================================
 
 GRIP_FORCE_TOPIC = "/dual_grip/grip_force"
+GRASP_ASSIST_OFFSET_TOPIC = "/dual_grip/grasp_assist_offset"
 
 LEFT_EE_POSE_TOPIC = "/franka/left/ee_pose"
 RIGHT_EE_POSE_TOPIC = "/franka/right/ee_pose"
@@ -86,6 +88,15 @@ LOG_ROOT = (
     Path.home()
     / "franka_ros2_ws"
     / "experiment1_logs"
+)
+
+
+URDF_PATH = (
+    Path.home()
+    / "franka_ros2_ws"
+    / "src"
+    / "fr3_urdf"
+    / "fr3.urdf"
 )
 
 
@@ -206,10 +217,45 @@ class Experiment1Logger(Node):
         ).reshape(3)
 
         # ====================================================
+        # FK診断
+        # q_goalと実関節qを同じURDFでFKし，
+        # lifting開始時からの相対閉じ込み量を比較する。
+        # ====================================================
+
+        if not URDF_PATH.exists():
+            raise FileNotFoundError(
+                f"FR3 URDF not found: {URDF_PATH}"
+            )
+
+        self.fk_model = pin.buildModelFromUrdf(
+            str(URDF_PATH)
+        )
+        self.fk_data = self.fk_model.createData()
+
+        self.fk_frame_name = "fr3_hand_tcp"
+
+        if not self.fk_model.existFrame(
+            self.fk_frame_name
+        ):
+            self.fk_frame_name = "fr3_link8"
+
+        if not self.fk_model.existFrame(
+            self.fk_frame_name
+        ):
+            raise ValueError(
+                "FK diagnostic EE frame not found"
+            )
+
+        self.fk_frame_id = self.fk_model.getFrameId(
+            self.fk_frame_name
+        )
+
+        # ====================================================
         # 最新値
         # ====================================================
 
         self.grip_force_n = np.nan
+        self.grasp_assist_offset_m = np.nan
 
         self.left_ee_local = None
         self.right_ee_local = None
@@ -281,6 +327,11 @@ class Experiment1Logger(Node):
 
         self.lift_start_hand_distance_m = np.nan
 
+        # q_goalと実qは絶対基準が異なり得るので，
+        # それぞれlifting開始時のFK距離を独立に保存する。
+        self.lift_start_q_goal_fk_distance_m = np.nan
+        self.lift_start_q_fk_distance_m = np.nan
+
         self.current_lifting_rows = []
 
         # ====================================================
@@ -291,6 +342,12 @@ class Experiment1Logger(Node):
             Float64,
             GRIP_FORCE_TOPIC,
             self.grip_force_callback,
+            10,
+        )
+        self.create_subscription(
+            Float64,
+            GRASP_ASSIST_OFFSET_TOPIC,
+            self.grasp_assist_offset_callback,
             10,
         )
 
@@ -488,6 +545,8 @@ class Experiment1Logger(Node):
             "lifting_mode",
 
             "grip_force_N",
+            "grasp_assist_offset_m",
+            "grasp_assist_offset_mm",
             "lift_start_grip_force_N",
             "eval_grip_target_N",
             "grip_error_to_eval_target_N",
@@ -500,6 +559,21 @@ class Experiment1Logger(Node):
             # どれだけ縮んだかという観測量
             "effective_closing_m",
             "effective_closing_mm",
+
+            "assist_target_hand_distance_m",
+
+            "q_goal_fk_hand_distance_m",
+            "lift_start_q_goal_fk_distance_m",
+            "q_goal_fk_closing_m",
+            "q_goal_fk_closing_mm",
+
+            "q_fk_hand_distance_m",
+            "lift_start_q_fk_distance_m",
+            "q_fk_closing_m",
+            "q_fk_closing_mm",
+
+            "ik_unrealized_closing_mm",
+            "robot_unrealized_closing_mm",
 
             "left_ee_world_x_m",
             "left_ee_world_y_m",
@@ -576,6 +650,12 @@ class Experiment1Logger(Node):
         self.grip_force_n = float(
             msg.data
         )
+
+    def grasp_assist_offset_callback(
+        self,
+        msg: Float64,
+    ):
+        self.grasp_assist_offset_m = float(msg.data)
 
     def left_pose_callback(
         self,
@@ -769,6 +849,91 @@ class Experiment1Logger(Node):
         )
 
     # ========================================================
+    # FK診断
+    # ========================================================
+
+    def fk_ee_local_from_q7(
+        self,
+        q7,
+    ):
+        q7 = np.asarray(
+            q7,
+            dtype=float,
+        ).reshape(-1)
+
+        if q7.size < 7:
+            return None
+
+        if not np.all(
+            np.isfinite(q7[:7])
+        ):
+            return None
+
+        q_full = pin.neutral(
+            self.fk_model
+        )
+
+        q_full[:7] = q7[:7]
+
+        if self.fk_model.nq >= 9:
+            q_full[7] = 0.02
+            q_full[8] = 0.02
+
+        pin.forwardKinematics(
+            self.fk_model,
+            self.fk_data,
+            q_full,
+        )
+        pin.updateFramePlacements(
+            self.fk_model,
+            self.fk_data,
+        )
+
+        return (
+            self.fk_data
+            .oMf[self.fk_frame_id]
+            .translation
+            .copy()
+        )
+
+    def get_fk_hand_distance(
+        self,
+        left_q7,
+        right_q7,
+    ):
+        left_local = self.fk_ee_local_from_q7(
+            left_q7
+        )
+        right_local = self.fk_ee_local_from_q7(
+            right_q7
+        )
+
+        if (
+            left_local is None
+            or right_local is None
+        ):
+            return np.nan
+
+        left_world = (
+            self.left_base_world
+            + self.left_rot_world
+            @ left_local
+        )
+
+        right_world = (
+            self.right_base_world
+            + self.right_rot_world
+            @ right_local
+        )
+
+        return float(
+            np.linalg.norm(
+                right_world
+                - left_world
+            )
+        )
+
+    # ========================================================
     # lifting開始・終了
     # ========================================================
 
@@ -799,6 +964,20 @@ class Experiment1Logger(Node):
 
         self.lift_start_hand_distance_m = (
             hand_distance_m
+        )
+
+        self.lift_start_q_goal_fk_distance_m = (
+            self.get_fk_hand_distance(
+                self.left_q_goal,
+                self.right_q_goal,
+            )
+        )
+
+        self.lift_start_q_fk_distance_m = (
+            self.get_fk_hand_distance(
+                self.left_q,
+                self.right_q,
+            )
         )
 
         self.current_lifting_rows = []
@@ -836,9 +1015,17 @@ class Experiment1Logger(Node):
             for r in self.current_lifting_rows
         ], dtype=float)
 
+        assist_offset = np.array([
+            r["grasp_assist_offset_mm"]
+            for r in self.current_lifting_rows
+        ], dtype=float)
+
         valid_grip = np.isfinite(grip)
         valid_closing = np.isfinite(
             closing
+        )
+        valid_assist_offset = np.isfinite(
+            assist_offset
         )
 
         if len(t) >= 2:
@@ -901,6 +1088,14 @@ class Experiment1Logger(Node):
         else:
             closing_max = np.nan
 
+
+        if np.any(valid_assist_offset):
+            assist_offset_max = float(
+                np.nanmax(assist_offset)
+            )
+        else:
+            assist_offset_max = np.nan
+
         summary = {
             "timestamp": (
                 datetime.now().isoformat(
@@ -929,6 +1124,9 @@ class Experiment1Logger(Node):
             ),
             "max_effective_closing_mm": (
                 closing_max
+            ),
+            "max_grasp_assist_offset_mm": (
+                assist_offset_max
             ),
             "raw_csv": str(
                 self.csv_path
@@ -972,7 +1170,9 @@ class Experiment1Logger(Node):
             f"min Fg={grip_min:.3f}N, "
             f"below target={below_time:.3f}s, "
             f"max effective closing="
-            f"{closing_max:.3f}mm"
+            f"{closing_max:.3f}mm, "
+            f"max assist cmd="
+            f"{assist_offset_max:.3f}mm"
         )
 
         self.get_logger().warn(
@@ -1072,6 +1272,102 @@ class Experiment1Logger(Node):
                 np.nan
             )
 
+        # ====================================================
+        # 把持アシスト距離追従の切り分け
+        # ====================================================
+
+        q_goal_fk_hand_distance_m = (
+            self.get_fk_hand_distance(
+                self.left_q_goal,
+                self.right_q_goal,
+            )
+        )
+
+        q_fk_hand_distance_m = (
+            self.get_fk_hand_distance(
+                self.left_q,
+                self.right_q,
+            )
+        )
+
+        if (
+            self.lifting_mode
+            and math.isfinite(
+                self.lift_start_hand_distance_m
+            )
+            and math.isfinite(
+                self.grasp_assist_offset_m
+            )
+        ):
+            assist_target_hand_distance_m = (
+                self.lift_start_hand_distance_m
+                - self.grasp_assist_offset_m
+            )
+        else:
+            assist_target_hand_distance_m = np.nan
+
+        if (
+            self.lifting_mode
+            and math.isfinite(
+                self.lift_start_q_goal_fk_distance_m
+            )
+            and math.isfinite(
+                q_goal_fk_hand_distance_m
+            )
+        ):
+            q_goal_fk_closing_m = (
+                self.lift_start_q_goal_fk_distance_m
+                - q_goal_fk_hand_distance_m
+            )
+        else:
+            q_goal_fk_closing_m = np.nan
+
+        if (
+            self.lifting_mode
+            and math.isfinite(
+                self.lift_start_q_fk_distance_m
+            )
+            and math.isfinite(
+                q_fk_hand_distance_m
+            )
+        ):
+            q_fk_closing_m = (
+                self.lift_start_q_fk_distance_m
+                - q_fk_hand_distance_m
+            )
+        else:
+            q_fk_closing_m = np.nan
+
+        if (
+            math.isfinite(
+                self.grasp_assist_offset_m
+            )
+            and math.isfinite(
+                q_goal_fk_closing_m
+            )
+        ):
+            ik_unrealized_closing_mm = (
+                self.grasp_assist_offset_m
+                - q_goal_fk_closing_m
+            ) * 1000.0
+        else:
+            ik_unrealized_closing_mm = np.nan
+
+        if (
+            math.isfinite(
+                q_goal_fk_closing_m
+            )
+            and math.isfinite(
+                q_fk_closing_m
+            )
+        ):
+            robot_unrealized_closing_mm = (
+                q_goal_fk_closing_m
+                - q_fk_closing_m
+            ) * 1000.0
+        else:
+            robot_unrealized_closing_mm = np.nan
+
         row = {
             "wall_time": (
                 datetime.now().isoformat(
@@ -1092,6 +1388,14 @@ class Experiment1Logger(Node):
 
             "grip_force_N": (
                 self.grip_force_n
+            ),
+            "grasp_assist_offset_m": (
+                self.grasp_assist_offset_m
+            ),
+            "grasp_assist_offset_mm": (
+                self.grasp_assist_offset_m * 1000.0
+                if math.isfinite(self.grasp_assist_offset_m)
+                else np.nan
             ),
             "lift_start_grip_force_N": (
                 self.lift_start_grip_force_n
@@ -1118,6 +1422,47 @@ class Experiment1Logger(Node):
             ),
             "effective_closing_mm": (
                 effective_closing_mm
+            ),
+
+            "assist_target_hand_distance_m": (
+                assist_target_hand_distance_m
+            ),
+
+            "q_goal_fk_hand_distance_m": (
+                q_goal_fk_hand_distance_m
+            ),
+            "lift_start_q_goal_fk_distance_m": (
+                self.lift_start_q_goal_fk_distance_m
+            ),
+            "q_goal_fk_closing_m": (
+                q_goal_fk_closing_m
+            ),
+            "q_goal_fk_closing_mm": (
+                q_goal_fk_closing_m * 1000.0
+                if math.isfinite(q_goal_fk_closing_m)
+                else np.nan
+            ),
+
+            "q_fk_hand_distance_m": (
+                q_fk_hand_distance_m
+            ),
+            "lift_start_q_fk_distance_m": (
+                self.lift_start_q_fk_distance_m
+            ),
+            "q_fk_closing_m": (
+                q_fk_closing_m
+            ),
+            "q_fk_closing_mm": (
+                q_fk_closing_m * 1000.0
+                if math.isfinite(q_fk_closing_m)
+                else np.nan
+            ),
+
+            "ik_unrealized_closing_mm": (
+                ik_unrealized_closing_mm
+            ),
+            "robot_unrealized_closing_mm": (
+                robot_unrealized_closing_mm
             ),
 
             "left_ee_world_x_m": (

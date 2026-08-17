@@ -6,8 +6,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import WrenchStamped
 
-# 既存の巨大なq_goal制御コードをそのまま利用する。
-# このファイルを test_scripts/ に置けば，隣の omega_to_fr3_q_goal_dual.py をimportできる。
+
 from omega_to_fr3_q_goal_dual import (  # noqa: E402
     OmegaToFR3QGoal,
     RIGHT_EE_WRENCH_TOPIC,
@@ -25,17 +24,7 @@ LEFT_OMEGA_FORCE_CMD_TOPIC = "/left/force_cmd"
 # ==========================================================
 # Lifting mode中の力覚返し設定
 # ==========================================================
-# "separate":
-#   リフティング中も通常通り，
-#   右FR3 -> 右Omega
-#   左FR3 -> 左Omega
-#
-# "right_average":
-#   リフティング中だけ，
-#   右FR3と左FR3のZ方向力覚の平均を右Omegaへ返す。
-#   左Omegaにはゼロを返す。
-#
-# 今回はユーザー指定どおり average mode にする。
+
 LIFTING_FORCE_FEEDBACK_MODE = "right_average"
 
 
@@ -126,8 +115,7 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
             10,
         )
 
-        # 既存コードも把持アシスト用に同じwrenchを購読しているが，
-        # 力覚返し用には独立したraw値として保持する。
+        
         self.create_subscription(
             WrenchStamped,
             RIGHT_EE_WRENCH_TOPIC,
@@ -496,7 +484,8 @@ def main() -> None:
     parser.add_argument("--fz", type=float, default=0.0)
 
     parser.add_argument("--enable-xy-force", action="store_true")
-    parser.add_argument("--force-gain-xy", type=float, default=0.08)
+    parser.add_argument("--force-gain-xy", type=float, default=0.08
+    )
     parser.add_argument("--force-gain-z", type=float, default=0.12)
     parser.add_argument("--force-limit", type=float, default=1.5)
     parser.add_argument("--force-deadband", type=float, default=0.2)

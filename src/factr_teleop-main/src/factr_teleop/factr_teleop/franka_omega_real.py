@@ -15,7 +15,7 @@ from pylibfranka import Robot, Torques
 # ===========================
 # 把持力計算用
 # ===========================
-FORCE_SIGN = -1.0
+FORCE_SIGN = +1.0
 CONTACT_THRESHOLD = 1.0  # N
 
 
@@ -25,7 +25,7 @@ CONTACT_THRESHOLD = 1.0  # N
 # 左Franka baseを共通world原点としたときの、右Franka baseの位置 [m]
 # ロボットが平行・同じ向きで、
 # 右Frankaが左Frankaから -Y 方向に1.0 m離れている場合
-RIGHT_BASE_OFFSET_IN_LEFT_WORLD = np.array([0.0, -0.50, 0.0], dtype=float)
+RIGHT_BASE_OFFSET_IN_LEFT_WORLD = np.array([0.0, 0.50, 0.0], dtype=float)
 
 
 # ===========================
