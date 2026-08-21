@@ -42,6 +42,7 @@ SII 実験1：把持アシスト OFF / ON 比較用「計測専用」ROS 2 logge
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 import math
 import time
@@ -64,6 +65,13 @@ from ohrc_msgs.msg import State
 # ============================================================
 
 GRIP_FORCE_TOPIC = "/dual_grip/grip_force"
+
+# SII_EX1_WRENCH_SYNC_V1
+# logger-only left/right wrench synchronization
+WRENCH_SYNC_MAX_DT_S = 0.020   # 20 ms
+WRENCH_SYNC_MAX_AGE_S = 0.060  # 60 ms
+WRENCH_SYNC_QUEUE_LEN = 200
+
 GRASP_ASSIST_OFFSET_TOPIC = "/dual_grip/grasp_assist_offset"
 
 LEFT_EE_POSE_TOPIC = "/franka/left/ee_pose"
@@ -254,7 +262,22 @@ class Experiment1Logger(Node):
         # 最新値
         # ====================================================
 
+        # Evaluation force: synchronized independent measurement.
         self.grip_force_n = np.nan
+        # Original /dual_grip/grip_force for comparison only.
+        self.grip_force_topic_n = np.nan
+        self.grip_force_sync_n = np.nan
+        self.left_inward_force_sync_n = np.nan
+        self.right_inward_force_sync_n = np.nan
+        self.wrench_sync_dt_ms = np.nan
+        self.wrench_sync_age_ms = np.nan
+        self.wrench_sync_valid = False
+        self.left_wrench_sync_queue = deque(
+            maxlen=WRENCH_SYNC_QUEUE_LEN
+        )
+        self.right_wrench_sync_queue = deque(
+            maxlen=WRENCH_SYNC_QUEUE_LEN
+        )
         self.grasp_assist_offset_m = np.nan
 
         self.left_ee_local = None
@@ -504,6 +527,11 @@ class Experiment1Logger(Node):
         self.get_logger().info(
             "SII Experiment 1 LOGGER ONLY"
         )
+        self.get_logger().warn(
+            "WRENCH SYNC MEASUREMENT ENABLED: "
+            f"max_dt={WRENCH_SYNC_MAX_DT_S*1000.0:.1f} ms, "
+            f"max_age={WRENCH_SYNC_MAX_AGE_S*1000.0:.1f} ms"
+        )
         self.get_logger().info(
             "NO control command is published."
         )
@@ -545,6 +573,13 @@ class Experiment1Logger(Node):
             "lifting_mode",
 
             "grip_force_N",
+            "grip_force_topic_N",
+            "grip_force_sync_N",
+            "left_inward_force_sync_N",
+            "right_inward_force_sync_N",
+            "wrench_sync_dt_ms",
+            "wrench_sync_age_ms",
+            "wrench_sync_valid",
             "grasp_assist_offset_m",
             "grasp_assist_offset_mm",
             "lift_start_grip_force_N",
@@ -647,7 +682,7 @@ class Experiment1Logger(Node):
         self,
         msg: Float64,
     ):
-        self.grip_force_n = float(
+        self.grip_force_topic_n = float(
             msg.data
         )
 
@@ -677,24 +712,36 @@ class Experiment1Logger(Node):
         self,
         msg: WrenchStamped,
     ):
-        self.left_force_world = (
-            get_force_from_wrench(msg)
-        )
+        force = get_force_from_wrench(msg)
+        torque = get_torque_from_wrench(msg)
 
-        self.left_torque_world = (
-            get_torque_from_wrench(msg)
+        self.left_force_world = force
+        self.left_torque_world = torque
+
+        self.left_wrench_sync_queue.append(
+            self.make_wrench_sync_sample(
+                msg,
+                force,
+                torque,
+            )
         )
 
     def right_wrench_callback(
         self,
         msg: WrenchStamped,
     ):
-        self.right_force_world = (
-            get_force_from_wrench(msg)
-        )
+        force = get_force_from_wrench(msg)
+        torque = get_torque_from_wrench(msg)
 
-        self.right_torque_world = (
-            get_torque_from_wrench(msg)
+        self.right_force_world = force
+        self.right_torque_world = torque
+
+        self.right_wrench_sync_queue.append(
+            self.make_wrench_sync_sample(
+                msg,
+                force,
+                torque,
+            )
         )
 
     def left_force_cmd_callback(
@@ -780,6 +827,149 @@ class Experiment1Logger(Node):
         # lifting_modeの状態と一致するため、
         # logger側は観測値としてこれを記録する。
         self.lifting_mode = button_now
+
+    # ========================================================
+    # synchronized left/right wrench measurement
+    # ========================================================
+
+    @staticmethod
+    def wrench_header_time_sec(msg: WrenchStamped):
+        stamp = msg.header.stamp
+        t = (
+            float(stamp.sec)
+            + float(stamp.nanosec) * 1.0e-9
+        )
+        if t <= 1.0e-9:
+            return np.nan
+        return t
+
+    def make_wrench_sync_sample(
+        self,
+        msg: WrenchStamped,
+        force: np.ndarray,
+        torque: np.ndarray,
+    ):
+        return {
+            "receive_t": float(time.monotonic()),
+            "header_t": self.wrench_header_time_sec(msg),
+            "force": np.asarray(force, dtype=float).copy(),
+            "torque": np.asarray(torque, dtype=float).copy(),
+        }
+
+    @staticmethod
+    def wrench_pair_dt_s(left_sample, right_sample):
+        lt = float(left_sample["header_t"])
+        rt = float(right_sample["header_t"])
+
+        if math.isfinite(lt) and math.isfinite(rt):
+            return abs(lt - rt)
+
+        return abs(
+            float(left_sample["receive_t"])
+            - float(right_sample["receive_t"])
+        )
+
+    def synchronized_grip_force(
+        self,
+        grip_axis: np.ndarray,
+    ):
+        invalid = (
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            False,
+        )
+
+        if (
+            grip_axis is None
+            or not np.all(np.isfinite(grip_axis))
+            or not self.left_wrench_sync_queue
+            or not self.right_wrench_sync_queue
+        ):
+            return invalid
+
+        now = float(time.monotonic())
+
+        left_samples = list(
+            self.left_wrench_sync_queue
+        )[-40:]
+        right_samples = list(
+            self.right_wrench_sync_queue
+        )[-40:]
+
+        best = None
+        best_pair_receive_t = -np.inf
+
+        for left_sample in left_samples:
+            for right_sample in right_samples:
+                dt_s = self.wrench_pair_dt_s(
+                    left_sample,
+                    right_sample,
+                )
+
+                if dt_s > WRENCH_SYNC_MAX_DT_S:
+                    continue
+
+                pair_receive_t = max(
+                    float(left_sample["receive_t"]),
+                    float(right_sample["receive_t"]),
+                )
+
+                age_s = now - pair_receive_t
+
+                if (
+                    age_s < 0.0
+                    or age_s > WRENCH_SYNC_MAX_AGE_S
+                ):
+                    continue
+
+                if pair_receive_t > best_pair_receive_t:
+                    best_pair_receive_t = pair_receive_t
+                    best = (
+                        left_sample,
+                        right_sample,
+                        dt_s,
+                        age_s,
+                    )
+
+        if best is None:
+            return invalid
+
+        left_sample, right_sample, dt_s, age_s = best
+
+        left_force = np.asarray(
+            left_sample["force"],
+            dtype=float,
+        )
+        right_force = np.asarray(
+            right_sample["force"],
+            dtype=float,
+        )
+
+        # grip_axis points LEFT -> RIGHT in common world.
+        left_inward = max(
+            0.0,
+            float(np.dot(left_force, grip_axis)),
+        )
+        right_inward = max(
+            0.0,
+            float(np.dot(right_force, -grip_axis)),
+        )
+
+        grip_force = 0.5 * (
+            left_inward + right_inward
+        )
+
+        return (
+            grip_force,
+            left_inward,
+            right_inward,
+            dt_s * 1000.0,
+            age_s * 1000.0,
+            True,
+        )
 
     # ========================================================
     # 幾何
@@ -1199,6 +1389,25 @@ class Experiment1Logger(Node):
             grip_axis,
         ) = self.get_hand_geometry()
 
+        (
+            self.grip_force_sync_n,
+            self.left_inward_force_sync_n,
+            self.right_inward_force_sync_n,
+            self.wrench_sync_dt_ms,
+            self.wrench_sync_age_ms,
+            self.wrench_sync_valid,
+        ) = self.synchronized_grip_force(
+            grip_axis
+        )
+
+        if self.wrench_sync_valid:
+            self.grip_force_n = float(
+                self.grip_force_sync_n
+            )
+        else:
+            # Never convert a missing asynchronous arm to 0 N.
+            self.grip_force_n = np.nan
+
         # lifting立ち上がり
         if (
             self.lifting_mode
@@ -1388,6 +1597,28 @@ class Experiment1Logger(Node):
 
             "grip_force_N": (
                 self.grip_force_n
+            ),
+
+            "grip_force_topic_N": (
+                self.grip_force_topic_n
+            ),
+            "grip_force_sync_N": (
+                self.grip_force_sync_n
+            ),
+            "left_inward_force_sync_N": (
+                self.left_inward_force_sync_n
+            ),
+            "right_inward_force_sync_N": (
+                self.right_inward_force_sync_n
+            ),
+            "wrench_sync_dt_ms": (
+                self.wrench_sync_dt_ms
+            ),
+            "wrench_sync_age_ms": (
+                self.wrench_sync_age_ms
+            ),
+            "wrench_sync_valid": int(
+                self.wrench_sync_valid
             ),
             "grasp_assist_offset_m": (
                 self.grasp_assist_offset_m
