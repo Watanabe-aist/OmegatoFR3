@@ -49,7 +49,7 @@ import omega_to_fr3_q_goal_dual as base
 # ==========================================================
 base.ENABLE_RIGHT_MIDPOINT_CONTROL = False
 base.ENABLE_LEFT_MIDPOINT_CONTROL = False
-base.ENABLE_GRASP_ASSIST = False 
+
 
 # ==========================================================
 # 実FR3 joint state topic

@@ -626,7 +626,7 @@ def main():
 
     args = parser.parse_args()
 
-    rclpy.init()
+    rclpy.init(args=["--ros-args", "--log-level", "WARN"])
 
     node = FrankaOmegaReal(args.name)
 

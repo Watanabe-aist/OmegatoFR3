@@ -40,7 +40,7 @@ JOINT_VEL_LIMIT_RAD_S = 1.0
 # ===========================
 # Omega本体操作スケール
 # ===========================
-OMEGA_POS_SCALE = 4.0
+OMEGA_POS_SCALE = 6.0
 OMEGA_ROT_SCALE = 1.0
 
 

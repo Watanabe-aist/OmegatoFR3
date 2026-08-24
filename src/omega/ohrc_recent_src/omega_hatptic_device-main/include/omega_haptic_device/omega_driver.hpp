@@ -19,6 +19,7 @@
 
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #include "dhdc.h"
 #include "drdc.h"
@@ -38,6 +39,14 @@ protected:
   double gripper_force_sign_ = 1.0;
 
   void gripperForceCallback(const std_msgs::msg::Float64::SharedPtr msg);
+
+  // Experiment 2: right-Omega finger force-feedback gate
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
+    sub_force_feedback_enable_;
+  bool force_feedback_enabled_ = true;
+  void forceFeedbackEnableCallback(
+    const std_msgs::msg::Bool::SharedPtr msg
+  );
 
   // ===== 追加：Omega XYZ方向力覚フィードバック用 =====
   rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr sub_force_cmd_;

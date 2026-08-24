@@ -54,6 +54,19 @@ OmegaDriver::OmegaDriver(int id)
       std::bind(&OmegaDriver::gripperForceCallback, this, std::placeholders::_1)
     );
 
+    // Experiment 2: finger force-feedback gate
+    // C1/C2=false, C3/C4=true
+    sub_force_feedback_enable_ =
+      this->create_subscription<std_msgs::msg::Bool>(
+        "/sii_ex2/force_feedback_enabled",
+        10,
+        std::bind(
+          &OmegaDriver::forceFeedbackEnableCallback,
+          this,
+          std::placeholders::_1
+        )
+      );
+
     RCLCPP_INFO(
       this->get_logger(),
       "subscribe gripper force feedback: /dual_grip/grip_force"
@@ -110,6 +123,20 @@ void OmegaDriver::gripperForceCallback(
   );
 
   gripper_force_cmd_ = f_cmd;
+}
+
+
+// ===== Experiment 2: finger force-feedback ON/OFF =====
+void OmegaDriver::forceFeedbackEnableCallback(
+  const std_msgs::msg::Bool::SharedPtr msg
+)
+{
+  force_feedback_enabled_ = msg->data;
+
+  // Remove a stored command immediately when feedback is OFF.
+  if (!force_feedback_enabled_) {
+    gripper_force_cmd_ = 0.0;
+  }
 }
 
 // ===== 追加：XYZ方向の力指令を保存 =====
@@ -378,7 +405,7 @@ int OmegaDriver::control()
     omega.wrench.torque.y = 0.0;
     omega.wrench.torque.z = 0.0;
 
-    if (device_name_ == "right") {
+    if (device_name_ == "right" && force_feedback_enabled_) {
       omega.gripper.force = gripper_force_cmd_;
     } else {
       omega.gripper.force = 0.0;
