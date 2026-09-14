@@ -1,36 +1,5 @@
 #!/usr/bin/env python3
-"""
-Actual-Q Normal DLS + bilateral force feedback
-+ lifting-entry Cartesian target continuity.
 
-変更点
-------
-1. TimeSeries IKは使わない。
-2. 毎周期、通常DLS IKを最新の実FR3 qから解く。
-3. lifting開始時だけ、
-   「現在の実EE pose」ではなく
-   「直前の通常モードで使っていた target_pos / target_rot」
-   をlifting初期基準として引き継ぐ。
-
-目的
-----
-通常把持中:
-    target_pos = Omega操作 + grip position control を含む現在の目標
-
-lifting ON:
-    そのtargetをそのままlift基準にする
-
-これにより lifting ON の瞬間に
-    q_goal -> q_actual
-へ戻って腕間が開く動作を防ぐ。
-
-起動例
-------
-python3 omega_to_fr3_q_goal_dual_actualq_dls_liftfix_pi.py \
-  --name dual \
-  --force-mode wrench \
-  --force-gain-z 0.12
-"""
 
 from __future__ import annotations
 
@@ -49,6 +18,7 @@ import omega_to_fr3_q_goal_dual as base
 # ==========================================================
 base.ENABLE_RIGHT_MIDPOINT_CONTROL = False
 base.ENABLE_LEFT_MIDPOINT_CONTROL = False
+#base.ENABLE_GRASP_ASSIST = False
 
 
 # ==========================================================
