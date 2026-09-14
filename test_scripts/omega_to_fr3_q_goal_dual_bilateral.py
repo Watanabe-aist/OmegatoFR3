@@ -187,27 +187,19 @@ class IntegratedBilateralOmegaToFR3FactrStyle(OmegaToFR3QGoal):
     # ------------------------------------------------------
     def get_omega_linear_velocity(self, side: str) -> np.ndarray:
         """
-        Omega実機の手先速度を取り出す。
-        既存のOmegaToFR3QGoalが /right/state, /left/state を購読して
-        self.right_omega / self.left_omega に保持している前提。
-        取得できない場合はゼロを返す。
+        Omega実機の手先並進速度を取得する。
+        /right/state, /left/state の msg.twist.linear を
+        base側の OmegaState.linear_vel に保存した値を使用する。
         """
-        try:
-            if side == "right":
-                omega_state = self.right_omega
-            else:
-                omega_state = self.left_omega
+        if side == "right":
+            omega_state = self.right_omega
+        else:
+            omega_state = self.left_omega
 
-            return np.array(
-                [
-                    omega_state.twist.linear.x,
-                    omega_state.twist.linear.y,
-                    omega_state.twist.linear.z,
-                ],
-                dtype=float,
-            )
-        except Exception:
-            return np.zeros(3, dtype=float)
+        return np.asarray(
+            omega_state.linear_vel,
+            dtype=float,
+        ).copy()
 
     def apply_factr_style_damping_and_comp(
         self,
@@ -488,7 +480,7 @@ def main() -> None:
     )
     parser.add_argument("--force-gain-z", type=float, default=0.12)
     parser.add_argument("--force-limit", type=float, default=1.5)
-    parser.add_argument("--force-deadband", type=float, default=0.2)
+    parser.add_argument("--force-deadband", type=float, default=0.0)
     parser.add_argument("--lpf-alpha", type=float, default=0.40)
     parser.add_argument("--bias-samples", type=int, default=200)
     parser.add_argument("--force-damping-xy", type=float, default=0.15)

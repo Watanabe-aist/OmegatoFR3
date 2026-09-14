@@ -305,6 +305,9 @@ class OmegaState:
         self.initial_pos = np.zeros(3)
         self.pos = np.zeros(3)
 
+        # Omega Cartesian linear velocity [m/s]
+        self.linear_vel = np.zeros(3)
+
         self.initial_rot = np.eye(3)
         self.rot = np.eye(3)
 
@@ -1286,6 +1289,13 @@ class OmegaToFR3QGoal(Node):
 
         omega_state.pos = p
         omega_state.rot = R
+
+        # Omega実機の並進速度を保存
+        omega_state.linear_vel = np.array([
+            msg.twist.linear.x,
+            msg.twist.linear.y,
+            msg.twist.linear.z,
+        ], dtype=float)
 
         gripper_angle = self.extract_gripper_angle(msg)
 
